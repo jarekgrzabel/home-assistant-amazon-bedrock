@@ -115,16 +115,66 @@ def is_action_request(text: str) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    action_keywords = [
-        "włącz", "wlacz", "wyłącz", "wylacz", "wlacz", "wylacz",
-        "turn on", "turn off", "toggle", "switch on", "switch off",
-        "zamknij", "otwórz", "otworz", "open", "close",
-        "uruchom", "załącz", "załacz", "start", "stop"
+    action_patterns = [
+        r"\bwłąc(?:z|zyć|yc)\b", r"\bwlacz\b", r"\bwyłąc(?:z|zyć|yc)\b", r"\bwyklacz\b",
+        r"\buruchom\b", r"\bzałącz\b", r"\bzałacz\b",
+        r"\bzamknij\b", r"\botwórz\b", r"\botworz\b",
+        r"\bstart\b", r"\bstop\b",
+        r"\bturn on\b", r"\bturn off\b", r"\bswitch on\b", r"\bswitch off\b", r"\btoggle\b",
+        r"\bopen\b", r"\bclose\b"
     ]
-    for keyword in action_keywords:
-        if keyword in lowered:
+    for pattern in action_patterns:
+        if re.search(pattern, lowered):
             return True
     return False
+
+
+def extract_last_assistant_text(payload: Dict[str, Any]) -> str:
+    messages = payload.get("messages") or []
+    for message in reversed(messages):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    texts.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    texts.append(item)
+            if texts:
+                return " ".join(t for t in texts if t)
+        if isinstance(content, dict):
+            text_value = content.get("text")
+            if text_value:
+                return text_value
+    return ""
+
+def is_confirmation(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.strip().lower()
+    confirmations = {
+        "tak", "tak proszę", "tak prosze", "ok", "okej", "potwierdzam", "potwierdz",
+        "proszę", "prosze", "zrób", "zrob", "wykonaj", "zrób to", "zrob to",
+        "zrób proszę", "zrob prosze", "yes", "sure", "please do", "do it"
+    }
+    normalized = lowered.replace('!', '').replace('.', '').replace(',', '')
+    return normalized in confirmations
+
+def assistant_requested_confirmation(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    keywords = [
+        "potwierdzasz", "potwierdzić", "potwierdzic", "czy mam", "czy chcesz",
+        "czy życzysz", "czy życzysz sobie", "czy wykonać", "czy wykonac",
+        "mam wyłączyć", "mam wylaczyc", "mam włączyć", "mam wlaczyc",
+        "czy mam wyłączyć", "czy mam wlaczyc", "czy mam właczyć"
+    ]
+    return any(keyword in lowered for keyword in keywords)
 def prepare_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if payload is None:
         return {}
@@ -154,7 +204,14 @@ def prepare_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     if tool_is_auto:
         last_user_text = extract_last_user_text(payload)
-        if last_user_text and not is_action_request(last_user_text):
+        action_intent = False
+        if last_user_text:
+            action_intent = is_action_request(last_user_text)
+            if not action_intent:
+                last_assistant_text = extract_last_assistant_text(payload)
+                if is_confirmation(last_user_text) and assistant_requested_confirmation(last_assistant_text):
+                    action_intent = True
+        if not action_intent:
             payload['_tools_disabled'] = True
             payload.pop('tool_choice', None)
     if 'max_tokens' in payload and 'max_output_tokens' not in payload:

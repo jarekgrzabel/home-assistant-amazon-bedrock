@@ -107,6 +107,29 @@ def test_prepare_payload_sets_tool_choice_to_none_for_question():
     assert "tool_choice" not in prepared
 
 
+
+
+def test_prepare_payload_keeps_auto_after_confirmation():
+    payload = {
+        "model": "eu.amazon.nova-lite-v1:0",
+        "messages": [
+            {"role": "assistant", "content": "Czy mam wyłączyć światło w biurze? Potwierdzasz?"},
+            {"role": "user", "content": "tak"}
+        ],
+        "functions": [
+            {
+                "name": "execute_services",
+                "description": "Execute",
+                "parameters": {"type": "object", "properties": {}}
+            }
+        ],
+    }
+
+    prepared = handler.prepare_payload(payload)
+
+    assert prepared.get("_tools_disabled") is None
+    assert prepared["tool_choice"] == "auto"
+
 def test_prepare_payload_keeps_auto_for_action_request():
     payload = {
         "model": "eu.amazon.nova-lite-v1:0",
