@@ -1,0 +1,58 @@
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Proxy for OpenAI Responses API backed by Amazon Bedrock Nova.
+
+Globals:
+  Function:
+    Runtime: python3.11
+    MemorySize: 512
+    Timeout: 30
+    Tracing: Active
+
+Resources:
+  ResponsesApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        AllowMethods:
+          - POST
+        AllowOrigins:
+          - "https://*.homeassistant.local"
+          - "https://*.homeassistant"
+        MaxAge: 86400
+
+  ResponsesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Description: Bridges OpenAI Responses API calls to Amazon Bedrock Nova.
+      Environment:
+        Variables:
+          API_KEYS: "changeme"
+          BEDROCK_REGION: us-east-1
+          CORS_ALLOW_ORIGINS: "https://*.homeassistant.local"
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+              - bedrock:Converse
+              - bedrock:ConverseStream
+            Resource: "*"
+      Events:
+        Responses:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref ResponsesApi
+            Path: /v1/responses
+            Method: POST
+
+Outputs:
+  ResponsesEndpoint:
+    Description: Base URL for the proxy endpoint
+    Value: !Sub "https://${ResponsesApi}.execute-api.${AWS::Region}.amazonaws.com/v1/responses"
