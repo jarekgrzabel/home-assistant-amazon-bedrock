@@ -26,8 +26,15 @@ def test_build_bedrock_request_converts_messages():
             {"role": "user", "content": [{"type": "text", "text": "hello"}]},
             {
                 "role": "assistant",
-                "content": [
-                    {"type": "tool_call", "tool_call": {"name": "my_tool", "arguments": {"foo": "bar"}, "id": "abc"}}
+                "tool_calls": [
+                    {
+                        "id": "abc",
+                        "type": "function",
+                        "function": {
+                            "name": "my_tool",
+                            "arguments": '{"foo": "bar"}'
+                        }
+                    }
                 ]
             },
             {
@@ -48,7 +55,10 @@ def test_build_bedrock_request_converts_messages():
     assert request["system"] == [{"text": "sys"}]
     assert request["messages"][0]["role"] == "user"
     assert request["messages"][1]["role"] == "assistant"
-    assert request["messages"][1]["content"][0]["toolUse"]["name"] == "my_tool"
+    assistant_content = request["messages"][1]["content"][0]
+    assert "toolUse" in assistant_content
+    assert assistant_content["toolUse"]["name"] == "my_tool"
+    assert assistant_content["toolUse"]["input"] == {"foo": "bar"}
     assert request["messages"][2]["content"][0]["toolResult"]["toolUseId"] == "abc"
     assert request["inferenceConfig"] == {"temperature": 0.3, "maxTokens": 256}
     assert request["sessionState"] == {"metadata": {"session": "123"}}
@@ -77,6 +87,28 @@ def test_build_tool_config_from_payload():
     assert tool_config["tools"][0]["toolSpec"]["name"] == "turn_on"
     assert tool_config["tools"][0]["toolSpec"]["inputSchema"]["json"]["type"] == "object"
     assert tool_config["toolChoice"] == {"tool": {"name": "turn_on"}}
+
+
+def test_build_tool_config_ignores_none_choice():
+    payload = {
+        "model": "eu.amazon.nova-lite-v1:0",
+        "messages": [{"role": "user", "content": "status"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "execute_services",
+                    "parameters": {"type": "object"}
+                }
+            }
+        ],
+        "tool_choice": "none"
+    }
+
+    request = handler.build_bedrock_request(payload)
+
+    tool_config = request["toolConfig"]
+    assert "toolChoice" not in tool_config
 
 
 

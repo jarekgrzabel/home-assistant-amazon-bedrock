@@ -5,7 +5,7 @@ import os
 import re
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import boto3  # type: ignore
@@ -218,6 +218,8 @@ def prepare_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         payload['max_output_tokens'] = payload['max_tokens']
     return payload
 def normalize_content(content: Any) -> List[Dict[str, Any]]:
+    if content is None:
+        return []
     if isinstance(content, list):
         norm = []
         for item in content:
@@ -258,9 +260,10 @@ def convert_tool_message(message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def convert_assistant_message(message: Dict[str, Any]) -> Dict[str, Any]:
+def convert_assistant_message(message: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     content_items = normalize_content(message.get("content"))
     parts: List[Dict[str, Any]] = []
+    tool_use_ids: List[str] = []
     for item in content_items:
         item_type = item.get("type", "text")
         if item_type == "text":
@@ -270,6 +273,11 @@ def convert_assistant_message(message: Dict[str, Any]) -> Dict[str, Any]:
             tool_name = tool_call.get("name")
             tool_input = tool_call.get("arguments")
             tool_id = tool_call.get("id") or str(uuid.uuid4())
+            if isinstance(tool_input, str):
+                try:
+                    tool_input = json.loads(tool_input)
+                except json.JSONDecodeError:
+                    pass
             parts.append(
                 {
                     "toolUse": {
@@ -279,11 +287,33 @@ def convert_assistant_message(message: Dict[str, Any]) -> Dict[str, Any]:
                     }
                 }
             )
+            tool_use_ids.append(tool_id)
         else:
             parts.append({"text": json.dumps(item)})
+    tool_calls = message.get("tool_calls") or []
+    for call in tool_calls:
+        function_data = call.get("function", {})
+        tool_name = function_data.get("name")
+        arguments = function_data.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                pass
+        tool_id = call.get("id") or str(uuid.uuid4())
+        parts.append(
+            {
+                "toolUse": {
+                    "toolUseId": tool_id,
+                    "name": tool_name,
+                    "input": arguments or {}
+                }
+            }
+        )
+        tool_use_ids.append(tool_id)
     if not parts:
         parts.append({"text": ""})
-    return {"role": "assistant", "content": parts}
+    return {"role": "assistant", "content": parts}, tool_use_ids
 
 
 def convert_user_message(message: Dict[str, Any]) -> Dict[str, Any]:
@@ -314,6 +344,8 @@ def normalize_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
     system_prompts: List[Dict[str, Any]] = []
     converted_messages: List[Dict[str, Any]] = []
 
+    pending_tool_use_ids: Set[str] = set()
+
     for message in raw_messages:
         role = message.get("role")
         if not role:
@@ -326,9 +358,17 @@ def normalize_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
                     system_prompts.append({"text": text})
             continue
         if role == "assistant":
-            converted_messages.append(convert_assistant_message(message))
+            converted_message, tool_use_ids = convert_assistant_message(message)
+            pending_tool_use_ids = set(tool_use_ids)
+            converted_messages.append(converted_message)
         elif role == "tool":
-            converted_messages.append(convert_tool_message(message))
+            tool_call_id = message.get("tool_call_id")
+            if tool_call_id and tool_call_id in pending_tool_use_ids:
+                converted_messages.append(convert_tool_message(message))
+                pending_tool_use_ids.discard(tool_call_id)
+            else:
+                fallback = convert_user_message({"content": message.get("content")})
+                converted_messages.append(fallback)
         else:
             converted_messages.append(convert_user_message(message))
 
@@ -367,12 +407,16 @@ def build_tool_config(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if isinstance(tool_choice, str):
             if tool_choice == "auto":
                 choice = {"auto": {}}
+            elif tool_choice == "none":
+                choice = {}
             else:
                 choice = {"tool": {"name": tool_choice}}
         elif isinstance(tool_choice, dict):
             mode = tool_choice.get("type")
             if mode == "auto":
                 choice = {"auto": {}}
+            elif mode == "none":
+                choice = {}
             elif mode == "function":
                 tool_name = tool_choice.get("function", {}).get("name")
                 if tool_name:
@@ -554,6 +598,7 @@ def map_response(model_id: str, payload: Dict[str, Any], response: Dict[str, Any
             choice_message["tool_calls"] = tool_calls
             if message_content is None:
                 choice_message["content"] = None
+        finish_reason = "tool_calls" if tool_calls else "stop"
         chat_response = {
             "id": openai_response["id"],
             "object": "chat.completion",
@@ -564,7 +609,7 @@ def map_response(model_id: str, payload: Dict[str, Any], response: Dict[str, Any
                 {
                     "index": 0,
                     "message": choice_message,
-                    "finish_reason": "stop"
+                    "finish_reason": finish_reason
                 }
             ]
         }
