@@ -196,35 +196,18 @@ def convert_tool_message(message: Dict[str, Any]) -> Dict[str, Any]:
 def convert_assistant_message(message: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     content_items = normalize_content(message.get("content"))
     parts: List[Dict[str, Any]] = []
-    tool_use_ids: List[str] = []
     for item in content_items:
-        item_type = item.get("type", "text")
-        if item_type == "text":
+        if isinstance(item, dict) and item.get("type") == "text":
             parts.append({"text": item.get("text", "")})
-        elif item_type == "tool_call":
-            tool_call = item.get("tool_call", {})
-            tool_name = tool_call.get("name")
-            tool_input = tool_call.get("arguments")
-            tool_id = tool_call.get("id") or str(uuid.uuid4())
-            if isinstance(tool_input, str):
-                try:
-                    tool_input = json.loads(tool_input)
-                except json.JSONDecodeError:
-                    pass
-            parts.append(
-                {
-                    "toolUse": {
-                        "toolUseId": tool_id,
-                        "name": tool_name,
-                        "input": tool_input or {}
-                    }
-                }
-            )
-            tool_use_ids.append(tool_id)
+        elif isinstance(item, dict) and "text" in item and len(item) == 1:
+            parts.append({"text": item.get("text", "")})
+        elif isinstance(item, str):
+            parts.append({"text": item})
         else:
             parts.append({"text": json.dumps(item)})
-    tool_calls = message.get("tool_calls") or []
-    for call in tool_calls:
+
+    tool_use_ids: List[str] = []
+    for call in message.get("tool_calls") or []:
         function_data = call.get("function", {})
         tool_name = function_data.get("name")
         arguments = function_data.get("arguments")
@@ -244,6 +227,7 @@ def convert_assistant_message(message: Dict[str, Any]) -> Tuple[Dict[str, Any], 
             }
         )
         tool_use_ids.append(tool_id)
+
     if not parts:
         parts.append({"text": ""})
     return {"role": "assistant", "content": parts}, tool_use_ids
@@ -300,8 +284,7 @@ def normalize_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
                 converted_messages.append(convert_tool_message(message))
                 pending_tool_use_ids.discard(tool_call_id)
             else:
-                fallback = convert_user_message({"content": message.get("content")})
-                converted_messages.append(fallback)
+                raise ProxyError("Tool message without matching tool_call_id")
         else:
             converted_messages.append(convert_user_message(message))
 
@@ -445,6 +428,31 @@ def map_tool_calls(outputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return tool_calls
 
 
+def collect_output_text(outputs: List[Any]) -> str:
+    text_parts: List[str] = []
+    for output in outputs:
+        if isinstance(output, str):
+            text_parts.append(output)
+            continue
+        if not isinstance(output, dict):
+            continue
+        if "content" in output:
+            raw_content = output.get("content", [])
+        elif isinstance(output.get("message"), dict):
+            raw_content = output["message"].get("content", [])
+        else:
+            raw_content = []
+        if isinstance(raw_content, str):
+            text_parts.append(raw_content)
+            continue
+        for item in raw_content:
+            if isinstance(item, dict) and "text" in item:
+                text_parts.append(item.get("text", ""))
+    if not text_parts:
+        return ""
+    return strip_thinking_content("".join(text_parts))
+
+
 def map_response(model_id: str, payload: Dict[str, Any], response: Dict[str, Any], mode: str = "responses") -> Dict[str, Any]:
     raw_output = response.get("output", [])
     if isinstance(raw_output, dict):
@@ -456,41 +464,6 @@ def map_response(model_id: str, payload: Dict[str, Any], response: Dict[str, Any
             outputs = [raw_output]
     else:
         outputs = raw_output
-    text_chunks: List[str] = []
-    openai_output: List[Dict[str, Any]] = []
-
-    for output in outputs:
-        if isinstance(output, str):
-            text_chunks.append(output)
-            openai_output.append({"role": "assistant", "content": [{"type": "text", "text": output}]})
-            continue
-        if not isinstance(output, dict):
-            continue
-        role = output.get("role", "assistant")
-        if isinstance(output, dict):
-            if "content" in output:
-                raw_content = output.get("content", [])
-            elif isinstance(output.get("message"), dict):
-                raw_content = output["message"].get("content", [])
-            else:
-                raw_content = []
-        else:
-            raw_content = []
-        if isinstance(raw_content, str):
-            raw_content = [{"text": raw_content}]
-        content_items = []
-        for item in raw_content:
-            if isinstance(item, dict) and "text" in item:
-                text_value = item.get("text", "")
-                text_chunks.append(text_value)
-                content_items.append({"type": "text", "text": text_value})
-            elif isinstance(item, dict) and "toolUse" in item:
-                content_items.append({"type": "tool_call", "tool_call": item["toolUse"]})
-            else:
-                content_items.append({"type": "text", "text": json.dumps(item)})
-        if not content_items:
-            content_items.append({"type": "text", "text": ""})
-        openai_output.append({"role": role, "content": content_items})
 
     tool_calls = map_tool_calls(outputs)
 
@@ -502,6 +475,13 @@ def map_response(model_id: str, payload: Dict[str, Any], response: Dict[str, Any
     }
 
     metadata = payload.get("metadata")
+    output_text = collect_output_text(outputs)
+    assistant_output: List[Dict[str, Any]] = [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": output_text or ""}],
+        }
+    ]
 
     openai_response = {
         "id": response.get("responseId", f"resp-{uuid.uuid4()}") or f"resp-{uuid.uuid4()}",
@@ -510,21 +490,16 @@ def map_response(model_id: str, payload: Dict[str, Any], response: Dict[str, Any
         "created": int(time.time()),
         "status": "completed",
         "usage": usage,
-        "output": openai_output or [
-            {
-                "role": "assistant",
-                "content": [{"type": "text", "text": ""}]
-            }
-        ],
+        "output": assistant_output,
         "tool_calls": tool_calls,
     }
     if metadata is not None:
         openai_response["metadata"] = metadata
-    if text_chunks:
-        openai_response["output_text"] = strip_thinking_content("".join(text_chunks))
+    if output_text:
+        openai_response["output_text"] = output_text
 
     if mode == "chat":
-        assistant_text = openai_response.get("output_text", "")
+        assistant_text = output_text
         message_content = assistant_text if assistant_text else None
         choice_message: Dict[str, Any] = {"role": "assistant", "content": message_content}
         if tool_calls:
@@ -636,7 +611,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
             "keys": list(bedrock_response.keys()),
         }
         LOGGER.info("Received response from Bedrock: %s", response_summary)
-        LOGGER.info("BEDROCK_RAW %s", redact_pii(json.dumps(bedrock_response)))
+        LOGGER.debug("BEDROCK_RAW %s", redact_pii(json.dumps(bedrock_response)))
 
         effective_model_id = request.get("modelId") or payload.get("model") or "unknown-model"
         mode = "chat" if "chat/completions" in api_path else "responses"

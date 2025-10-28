@@ -65,6 +65,35 @@ def test_build_bedrock_request_converts_messages():
     assert request["sessionState"] == {"metadata": {"session": "123"}}
 
 
+def test_build_bedrock_request_requires_matching_tool_message():
+    payload = {
+        "model": "eu.amazon.nova-lite-v1:0",
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "abc",
+                        "type": "function",
+                        "function": {
+                            "name": "my_tool",
+                            "arguments": '{"foo": "bar"}'
+                        }
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "missing",
+                "content": [{"type": "text", "text": "done"}]
+            },
+        ],
+    }
+
+    with pytest.raises(handler.ProxyError):
+        handler.build_bedrock_request(payload)
+
+
 def test_build_tool_config_from_payload():
     payload = {
         "model": "eu.amazon.nova-lite-v1:0",
