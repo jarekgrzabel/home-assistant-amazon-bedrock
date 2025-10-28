@@ -16,6 +16,7 @@ def set_env(monkeypatch):
     monkeypatch.setenv("API_KEYS", "test-key")
     monkeypatch.setenv("CORS_ALLOW_ORIGINS", "*")
     monkeypatch.setenv("BEDROCK_REGION", "us-east-1")
+    monkeypatch.setenv("DEFAULT_MODEL_ID", "eu.amazon.nova-pro-v1:0")
 
 
 def test_build_bedrock_request_converts_messages():
@@ -275,3 +276,82 @@ def test_lambda_handler_returns_openai_shape(monkeypatch):
     assert body["usage"]["total_tokens"] == 36
     assert body["tool_calls"][0]["function"]["name"] == "turn_on"
     mock_client.converse.assert_called_once()
+
+
+def test_lambda_handler_handles_models_list():
+    event = {
+        "headers": {"Authorization": "Bearer test-key"},
+        "requestContext": {"http": {"method": "GET", "path": "/prod/v1//models"}},
+    }
+
+    response = handler.lambda_handler(event, None)
+    body = json.loads(response["body"])
+
+    assert response["statusCode"] == 200
+    assert body["object"] == "list"
+    assert body["data"][0]["id"] == "eu.amazon.nova-pro-v1:0"
+
+
+def test_lambda_handler_handles_models_detail():
+    event = {
+        "headers": {"Authorization": "Bearer test-key"},
+        "requestContext": {
+            "http": {
+                "method": "GET",
+                "path": "/prod/v1//models/eu.amazon.nova-pro-v1:0",
+            }
+        },
+    }
+
+    response = handler.lambda_handler(event, None)
+    body = json.loads(response["body"])
+
+    assert response["statusCode"] == 200
+    assert body["object"] == "model"
+    assert body["id"] == "eu.amazon.nova-pro-v1:0"
+
+
+def test_lambda_handler_normalizes_double_slash_for_chat(monkeypatch):
+    mock_client = MagicMock()
+    mock_client.converse.return_value = {
+        "responseId": "r-999",
+        "output": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"text": "sure"},
+                    {
+                        "toolUse": {
+                            "toolUseId": "call-42",
+                            "name": "execute_services",
+                            "input": {"entity_id": "light.office"},
+                        }
+                    },
+                ],
+            }
+        ],
+        "usage": {"inputTokens": 5, "outputTokens": 7, "totalTokens": 12},
+    }
+    monkeypatch.setattr(handler, "bedrock_client", lambda: mock_client)
+
+    event = {
+        "headers": {"Authorization": "Bearer test-key"},
+        "requestContext": {
+            "http": {"method": "POST", "path": "/prod/v1//chat/completions"}
+        },
+        "body": json.dumps(
+            {
+                "model": "eu.amazon.nova-lite-v1:0",
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "Toggle"}]}
+                ],
+            }
+        ),
+    }
+
+    response = handler.lambda_handler(event, None)
+    body = json.loads(response["body"])
+
+    assert response["statusCode"] == 200
+    assert body["object"] == "chat.completion"
+    assert body["choices"][0]["finish_reason"] == "tool_calls"

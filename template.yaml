@@ -35,6 +35,7 @@ Resources:
           API_KEYS: "changeme"
           BEDROCK_REGION: us-east-1
           CORS_ALLOW_ORIGINS: "https://*.homeassistant.local"
+          BEDROCK_MODEL_ID: eu.amazon.nova-lite-v1:0
       Policies:
         - Statement:
             Effect: Allow

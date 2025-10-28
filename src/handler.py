@@ -85,6 +85,42 @@ def strip_thinking_content(value: str) -> str:
     return cleaned.strip()
 
 
+def normalize_path(path: Optional[str]) -> str:
+    if not path:
+        return ""
+    normalized = re.sub(r'/+', '/', path)
+    if len(normalized) > 1 and normalized.endswith('/'):
+        normalized = normalized.rstrip('/')
+    return normalized
+
+
+def extract_api_path(path: str) -> str:
+    marker = "/v1"
+    if not path:
+        return ""
+    idx = path.find(marker)
+    if idx == -1:
+        return path
+    return path[idx:]
+
+
+def get_default_model_id() -> str:
+    return (
+        os.getenv("DEFAULT_MODEL_ID")
+        or os.getenv("BEDROCK_MODEL_ID")
+        or "eu.amazon.nova-lite-v1:0"
+    )
+
+
+def build_model_descriptor(model_id: str) -> Dict[str, Any]:
+    return {
+        "id": model_id,
+        "object": "model",
+        "created": 0,
+        "owned_by": "system",
+    }
+
+
 def prepare_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if payload is None:
         return {}
@@ -548,6 +584,28 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         token = extract_authorization(headers)
         validate_token(token)
 
+        http_info = (event.get("requestContext") or {}).get("http") or {}
+        raw_path = http_info.get("path")
+        normalized_path = normalize_path(raw_path)
+        api_path = extract_api_path(normalized_path)
+        method = (http_info.get("method") or "POST").upper()
+
+        if method == "GET":
+            trimmed = api_path.rstrip("/")
+            if trimmed == "/v1/models":
+                model_id = get_default_model_id()
+                body = {
+                    "object": "list",
+                    "data": [build_model_descriptor(model_id)],
+                }
+                return success_response(body)
+            if trimmed.startswith("/v1/models/"):
+                requested_id = trimmed[len("/v1/models/") :]
+                if not requested_id:
+                    raise ProxyError("Model id cannot be empty", status_code=400)
+                return success_response(build_model_descriptor(requested_id))
+            raise ProxyError("Unsupported GET path", status_code=404)
+
         payload = decode_body(event)
         payload = prepare_payload(payload)
         message_roles: List[str] = []
@@ -561,7 +619,8 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
             "model": payload.get("model"),
             "message_roles": message_roles,
             "tools": len(payload.get("tools") or []),
-            "stream": payload.get("stream", False)
+            "stream": payload.get("stream", False),
+            "path": api_path or normalized_path,
         }
         LOGGER.info("PAYLOAD_SUMMARY %s", payload_summary)
         if payload.get("stream"):
@@ -580,8 +639,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         LOGGER.info("BEDROCK_RAW %s", redact_pii(json.dumps(bedrock_response)))
 
         effective_model_id = request.get("modelId") or payload.get("model") or "unknown-model"
-        request_path = (event.get("requestContext", {}).get("http", {}) or {}).get("path", "")
-        mode = "chat" if "chat/completions" in request_path else "responses"
+        mode = "chat" if "chat/completions" in api_path else "responses"
         openai_response = map_response(effective_model_id, payload, bedrock_response, mode=mode)
         return success_response(openai_response)
 
