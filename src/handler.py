@@ -85,96 +85,6 @@ def strip_thinking_content(value: str) -> str:
     return cleaned.strip()
 
 
-def extract_last_user_text(payload: Dict[str, Any]) -> str:
-    messages = payload.get("messages") or []
-    for message in reversed(messages):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            texts = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    texts.append(item.get("text", ""))
-                elif isinstance(item, str):
-                    texts.append(item)
-            if texts:
-                return " ".join(t for t in texts if t)
-        if isinstance(content, dict):
-            text_value = content.get("text")
-            if text_value:
-                return text_value
-        # fallback
-        if "content" in message and isinstance(message["content"], str):
-            return message["content"]
-    return ""
-
-def is_action_request(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    action_patterns = [
-        r"\bwłąc(?:z|zyć|yc)\b", r"\bwlacz\b", r"\bwyłąc(?:z|zyć|yc)\b", r"\bwyklacz\b",
-        r"\buruchom\b", r"\bzałącz\b", r"\bzałacz\b",
-        r"\bzamknij\b", r"\botwórz\b", r"\botworz\b",
-        r"\bstart\b", r"\bstop\b",
-        r"\bturn on\b", r"\bturn off\b", r"\bswitch on\b", r"\bswitch off\b", r"\btoggle\b",
-        r"\bopen\b", r"\bclose\b"
-    ]
-    for pattern in action_patterns:
-        if re.search(pattern, lowered):
-            return True
-    return False
-
-
-def extract_last_assistant_text(payload: Dict[str, Any]) -> str:
-    messages = payload.get("messages") or []
-    for message in reversed(messages):
-        if message.get("role") != "assistant":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            texts = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    texts.append(item.get("text", ""))
-                elif isinstance(item, str):
-                    texts.append(item)
-            if texts:
-                return " ".join(t for t in texts if t)
-        if isinstance(content, dict):
-            text_value = content.get("text")
-            if text_value:
-                return text_value
-    return ""
-
-def is_confirmation(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.strip().lower()
-    confirmations = {
-        "tak", "tak proszę", "tak prosze", "ok", "okej", "potwierdzam", "potwierdz",
-        "proszę", "prosze", "zrób", "zrob", "wykonaj", "zrób to", "zrob to",
-        "zrób proszę", "zrob prosze", "yes", "sure", "please do", "do it"
-    }
-    normalized = lowered.replace('!', '').replace('.', '').replace(',', '')
-    return normalized in confirmations
-
-def assistant_requested_confirmation(text: str) -> bool:
-    if not text:
-        return False
-    lowered = text.lower()
-    keywords = [
-        "potwierdzasz", "potwierdzić", "potwierdzic", "czy mam", "czy chcesz",
-        "czy życzysz", "czy życzysz sobie", "czy wykonać", "czy wykonac",
-        "mam wyłączyć", "mam wylaczyc", "mam włączyć", "mam wlaczyc",
-        "czy mam wyłączyć", "czy mam wlaczyc", "czy mam właczyć"
-    ]
-    return any(keyword in lowered for keyword in keywords)
 def prepare_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     if payload is None:
         return {}
@@ -197,25 +107,12 @@ def prepare_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
                 payload['tool_choice'] = {'type': 'function', 'function': {'name': name}}
     if 'tools' in payload and payload.get('tools') and 'tool_choice' not in payload:
         payload['tool_choice'] = 'auto'
-    # Prevent tool calls for pure state queries
-    tool_choice = payload.get('tool_choice')
-    tool_is_auto = tool_choice == 'auto' or (
-        isinstance(tool_choice, dict) and 'auto' in tool_choice
-    )
-    if tool_is_auto:
-        last_user_text = extract_last_user_text(payload)
-        action_intent = False
-        if last_user_text:
-            action_intent = is_action_request(last_user_text)
-            if not action_intent:
-                last_assistant_text = extract_last_assistant_text(payload)
-                if is_confirmation(last_user_text) and assistant_requested_confirmation(last_assistant_text):
-                    action_intent = True
-        if not action_intent:
-            payload['_tools_disabled'] = True
-            payload.pop('tool_choice', None)
     if 'max_tokens' in payload and 'max_output_tokens' not in payload:
         payload['max_output_tokens'] = payload['max_tokens']
+    last_user_text = get_last_user_text(payload)
+    if last_user_text and looks_like_state_query(last_user_text):
+        payload['_tools_disabled'] = True
+        payload.pop('tool_choice', None)
     return payload
 def normalize_content(content: Any) -> List[Dict[str, Any]]:
     if content is None:
@@ -653,7 +550,20 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
 
         payload = decode_body(event)
         payload = prepare_payload(payload)
-        LOGGER.info("ORIGINAL_PAYLOAD %s", payload)
+        message_roles: List[str] = []
+        if isinstance(payload.get("messages"), list):
+            message_roles = [
+                msg.get("role")
+                for msg in payload.get("messages", [])
+                if isinstance(msg, dict) and msg.get("role")
+            ]
+        payload_summary = {
+            "model": payload.get("model"),
+            "message_roles": message_roles,
+            "tools": len(payload.get("tools") or []),
+            "stream": payload.get("stream", False)
+        }
+        LOGGER.info("PAYLOAD_SUMMARY %s", payload_summary)
         if payload.get("stream"):
             raise ProxyError("stream=true is not yet supported", status_code=400)
 
@@ -685,3 +595,63 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover
         LOGGER.exception("Unexpected error")
         return internal_error_response("Unexpected error")
+
+
+def get_last_user_text(payload: Dict[str, Any]) -> str:
+    messages = payload.get("messages") or []
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    texts.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    texts.append(item)
+            if texts:
+                return " ".join(t for t in texts if t)
+        if isinstance(content, dict):
+            text_value = content.get("text")
+            if text_value:
+                return text_value
+    return ""
+
+
+ACTION_PATTERNS = [
+    r"\bwłąc(?:z|zyć|yc)\b", r"\bwlacz\b", r"\bzaświeć\b", r"\bzaswiec\b",
+    r"\bwyłąc(?:z|zyć|yc)\b", r"\bwyklacz\b", r"\bwyłącz\b", r"\bwyłacz\b",
+    r"\buruchom\b", r"\bzałącz\b", r"\bzałacz\b",
+    r"\bzamknij\b", r"\botwórz\b", r"\botworz\b",
+    r"\bstart\b", r"\bstop\b",
+    r"\bturn on\b", r"\bturn off\b", r"\bswitch on\b", r"\bswitch off\b", r"\btoggle\b",
+    r"\bopen\b", r"\bclose\b", r"\bactivate\b", r"\bdeactivate\b"
+]
+
+STATE_HINTS = [
+    "czy", "jaki", "jakie", "jak", "stan", "status", "jest", "są", "są?", "działa", "działa?"
+]
+
+
+def looks_like_action(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    for pattern in ACTION_PATTERNS:
+        if re.search(pattern, lowered):
+            return True
+    return False
+
+
+def looks_like_state_query(text: str) -> bool:
+    if not text:
+        return False
+    stripped = text.strip().lower()
+    if looks_like_action(stripped):
+        return False
+    if "?" in stripped:
+        return True
+    return any(hint in stripped for hint in STATE_HINTS)

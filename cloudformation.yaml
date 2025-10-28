@@ -100,8 +100,11 @@ Resources:
                   - bedrock:InvokeModelWithResponseStream
                 Resource:
                   - !Sub arn:aws:bedrock:${BedrockRegion}::foundation-model/${BedrockBaseModelId}
+                  - !Sub arn:aws:bedrock:${BedrockRegion}::foundation-model/amazon.nova-*
                   - !Sub arn:aws:bedrock:*::foundation-model/${BedrockBaseModelId}
+                  - !Sub arn:aws:bedrock:*::foundation-model/amazon.nova-*
                   - !Sub arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${BedrockModelId}
+                  - !Sub arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/*
 
   ResponsesFunction:
     Type: AWS::Lambda::Function
