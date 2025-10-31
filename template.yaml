@@ -24,6 +24,20 @@ Resources:
           - "https://*.homeassistant"
         MaxAge: 86400
 
+  SessionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: conversation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: conversation_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   ResponsesFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -36,6 +50,9 @@ Resources:
           BEDROCK_REGION: us-east-1
           CORS_ALLOW_ORIGINS: "https://*.homeassistant.local"
           BEDROCK_MODEL_ID: eu.amazon.nova-lite-v1:0
+          SESSION_TABLE_NAME: !Ref SessionTable
+          SESSION_TTL_SECONDS: "300"
+          MAX_HISTORY_MESSAGES: "20"
       Policies:
         - Statement:
             Effect: Allow
@@ -45,6 +62,13 @@ Resources:
               - bedrock:Converse
               - bedrock:ConverseStream
             Resource: "*"
+        - Statement:
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+            Resource: !GetAtt SessionTable.Arn
       Events:
         Responses:
           Type: HttpApi

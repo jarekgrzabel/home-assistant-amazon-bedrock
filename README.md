@@ -1,3 +1,5 @@
+# 📌 Uwaga: aktualny kod został wygenerowany i zmodernizowany przez asystenta ChatGPT (Codex CLI).
+
 # HABedrock Responses Proxy
 
 Proxy zgodny z OpenAI Responses API, który deleguje zapytania do modelu Amazon Bedrock Nova (`amazon.nova-*-v1:0`). Aplikacja zapewnia kompatybilność z integracją Home Assistant Extended OpenAI Conversation przy minimalnej zmianie konfiguracji (podmiana `base_url` i `api_key`).
@@ -15,6 +17,9 @@ Kluczowe zmienne środowiskowe funkcji Lambda:
 - `API_KEYS` – lista akceptowanych tokenów rozdzielonych przecinkami; wykorzystywana do walidacji nagłówka `Authorization: Bearer <token>`.
 - `BEDROCK_REGION` – region Bedrock (np. `us-east-1`).
 - `CORS_ALLOW_ORIGINS` – lista dozwolonych originów CORS (domyślnie `https://*.homeassistant.local`).
+- `SESSION_TABLE_NAME` – nazwa tabeli DynamoDB używanej do przechowywania historii rozmów. Pozostaw puste, aby wyłączyć pamięć.
+- `SESSION_TTL_SECONDS` – czas życia wpisu w tabeli (domyślnie `300`, czyli 5 min). Po wygaśnięciu DynamoDB automatycznie usuwa historię.
+- `MAX_HISTORY_MESSAGES` – maksymalna liczba najnowszych wiadomości przechowywana dla pojedynczej konwersacji (domyślnie `20`).
 
 Jeżeli region/tenant wymaga **inference profile**, przekaż jego ARN w polu `inference_profile_id` (lub `inferenceProfileId`) w żądaniu `/v1/responses`. W przeciwnym razie użyty zostanie identyfikator modelu (`modelId`).
 
@@ -33,6 +38,22 @@ Lambda implementuje mapowanie zgodne z opisem w `AGENTS.md`:
 | `toolUse` w odpowiedzi    | `tool_calls[]` (bez wykonania narzędzia)      |
 
 Obsługiwane są komunikaty `tool` → `toolResult` oraz `assistant` z `tool_call`, zgodnie z wymaganiami Extended OpenAI Conversation.
+
+## Pamięć konwersacji
+
+### Identyfikator rozmowy
+- Najpewniejszym sposobem na utrzymanie kontekstu jest przekazanie własnego `metadata.conversation_id` (np. identyfikatora pipeline’u Assist). Wtedy wszystkie kolejne żądania w danej rozmowie będą łączyć istniejącą historię z nowymi wiadomościami.
+- Jeżeli klient nie przekaże identyfikatora, Lambda stosuje fallback `auth:<sha256(token)>`, co powoduje współdzielenie kontekstu przez wszystkie konwersacje wywoływane z danego klucza API.
+- W odpowiedzi proxy zwraca użyty `conversation_id`, dzięki czemu klient może go zapisać i wykorzystać w kolejnych wywołaniach lub przy ręcznym resecie.
+
+### Przechowywanie historii
+- Historia rozmowy jest normalizowana do naprzemiennych wpisów `{"role": "user"|"assistant", "content": "..."}` i zapisywana w DynamoDB.
+- Przed przekazaniem do Nova kontekst odbudowywany jest z system promptu, zapisanych wpisów oraz aktualnego pytania użytkownika. Wpisy narzędzi są streszczane, aby uniknąć konfliktu z konfiguracją `toolConfig`.
+- TTL ustawiony w `SESSION_TTL_SECONDS` (domyślnie 5 min) odpowiada za automatyczne wygaszanie kontekstu – po jego upływie nowe zapytanie zaczyna „od zera”.
+
+### Reset konwersacji
+- Aby wymusić wyczyszczenie historii, dodaj do żądania flagę `metadata.clear_conversation` (lub `reset_conversation` / `end_conversation`). Lambda usunie wpis w DynamoDB przed obsługą aktualnego zapytania.
+- Alternatywnie możesz skasować rekord w DynamoDB, posługując się identyfikatorem zwracanym w polu `conversation_id`.
 
 ## Uruchomienie z AWS SAM
 

@@ -71,6 +71,13 @@ Parameters:
     MaxValue: 3653
     Description: Retention for CloudWatch log groups.
 
+  SessionTtlSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 86400
+    Description: TTL (in seconds) for conversation sessions stored in DynamoDB.
+
 Conditions:
   UseCodeObjectVersion: !Not [!Equals [!Ref LambdaCodeS3ObjectVersion, '']]
 
@@ -105,6 +112,26 @@ Resources:
                   - !Sub arn:aws:bedrock:*::foundation-model/amazon.nova-*
                   - !Sub arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${BedrockModelId}
                   - !Sub arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/*
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt SessionTable.Arn
+
+  SessionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: conversation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: conversation_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
 
   ResponsesFunction:
     Type: AWS::Lambda::Function
@@ -123,6 +150,9 @@ Resources:
           BEDROCK_REGION: !Ref BedrockRegion
           CORS_ALLOW_ORIGINS: !Join [",", !Ref AllowedCorsOrigins]
           BEDROCK_MODEL_ID: !Ref BedrockModelId
+          SESSION_TABLE_NAME: !Ref SessionTable
+          SESSION_TTL_SECONDS: !Ref SessionTtlSeconds
+          MAX_HISTORY_MESSAGES: "20"
       Code:
         S3Bucket: !Ref LambdaCodeS3Bucket
         S3Key: !Ref LambdaCodeS3Key
