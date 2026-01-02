@@ -1,0 +1,20 @@
+# Python artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+
+# Build / packaging
+lambda.zip
+*.log
+
+# Local helper files
+.lambda_key*
+.api_key*
+
+# macOS
+.DS_Store
+.bucket_name

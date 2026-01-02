@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Deploys an API Gateway HTTP API and Lambda proxy that exposes an OpenAI Responses
+  compatible endpoint backed by Amazon Bedrock Nova, tailored for Home Assistant.
+
+Parameters:
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket that stores the Lambda deployment package.
+
+  LambdaCodeS3Key:
+    Type: String
+    Description: S3 key for the Lambda deployment package (ZIP file).
+
+  LambdaCodeS3ObjectVersion:
+    Type: String
+    Default: ''
+    Description: Optional S3 object version for the Lambda deployment package.
+
+  ApiKeys:
+    Type: String
+    NoEcho: true
+    Description: Comma separated list of bearer tokens accepted by the proxy.
+
+  AllowedCorsOrigins:
+    Type: CommaDelimitedList
+    Default: https://*.homeassistant.local
+    Description: Origins allowed to access the proxy via CORS.
+
+  BedrockRegion:
+    Type: String
+    Default: us-east-1
+    AllowedValues:
+      - us-east-1
+      - us-east-2
+      - us-west-2
+      - eu-west-1
+      - eu-central-1
+      - ap-northeast-1
+      - ap-southeast-1
+    Description: Region used for invoking Bedrock Nova models.
+
+  BedrockModelId:
+    Type: String
+    Default: eu.amazon.nova-lite-v1:0
+    Description: Bedrock model identifier to invoke (e.g. eu.amazon.nova-lite-v1:0).
+
+  BedrockBaseModelId:
+    Type: String
+    Default: amazon.nova-lite-v1:0
+    Description: Underlying Bedrock model name used for IAM permissions (e.g. amazon.nova-lite-v1:0).
+
+  LambdaTimeoutSeconds:
+    Type: Number
+    Default: 30
+    MinValue: 3
+    MaxValue: 900
+    Description: Lambda timeout in seconds.
+
+  LambdaMemorySize:
+    Type: Number
+    Default: 512
+    MinValue: 128
+    MaxValue: 10240
+    Description: Lambda memory size in MiB.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 14
+    MinValue: 1
+    MaxValue: 3653
+    Description: Retention for CloudWatch log groups.
+
+  SessionTtlSeconds:
+    Type: Number
+    Default: 300
+    MinValue: 60
+    MaxValue: 86400
+    Description: TTL (in seconds) for conversation sessions stored in DynamoDB.
+
+Conditions:
+  UseCodeObjectVersion: !Not [!Equals [!Ref LambdaCodeS3ObjectVersion, '']]
+
+Resources:
+  ResponsesFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BedrockInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:Converse
+                  - bedrock:ConverseStream
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub arn:aws:bedrock:${BedrockRegion}::foundation-model/${BedrockBaseModelId}
+                  - !Sub arn:aws:bedrock:${BedrockRegion}::foundation-model/amazon.nova-*
+                  - !Sub arn:aws:bedrock:*::foundation-model/${BedrockBaseModelId}
+                  - !Sub arn:aws:bedrock:*::foundation-model/amazon.nova-*
+                  - !Sub arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/${BedrockModelId}
+                  - !Sub arn:aws:bedrock:${BedrockRegion}:${AWS::AccountId}:inference-profile/*
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt SessionTable.Arn
+
+  SessionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: conversation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: conversation_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ResponsesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Proxy OpenAI Responses API endpoint backed by Amazon Bedrock Nova.
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt ResponsesFunctionRole.Arn
+      Timeout: !Ref LambdaTimeoutSeconds
+      MemorySize: !Ref LambdaMemorySize
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          API_KEYS: !Ref ApiKeys
+          BEDROCK_REGION: !Ref BedrockRegion
+          CORS_ALLOW_ORIGINS: !Join [",", !Ref AllowedCorsOrigins]
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          SESSION_TABLE_NAME: !Ref SessionTable
+          SESSION_TTL_SECONDS: !Ref SessionTtlSeconds
+          MAX_HISTORY_MESSAGES: "20"
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+        S3ObjectVersion: !If [UseCodeObjectVersion, !Ref LambdaCodeS3ObjectVersion, !Ref AWS::NoValue]
+
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ResponsesFunction}
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !Ref AWS::NoValue
+    DependsOn: ResponsesFunction
+
+  ResponsesApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub HABedrockResponses-${AWS::StackName}
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowCredentials: false
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        AllowMethods:
+          - POST
+        AllowOrigins: !Ref AllowedCorsOrigins
+        MaxAge: 86400
+
+  ResponsesIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ResponsesApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ResponsesFunction.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+      IntegrationMethod: POST
+      TimeoutInMillis: 28000
+
+  ResponsesRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ResponsesApi
+      RouteKey: POST /v1/responses
+      AuthorizationType: NONE
+      Target: !Sub integrations/${ResponsesIntegration}
+
+  ModelsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ResponsesApi
+      RouteKey: GET /v1/models
+      AuthorizationType: NONE
+      Target: !Sub integrations/${ResponsesIntegration}
+
+  ChatCompletionsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ResponsesApi
+      RouteKey: POST /v1/chat/completions
+      AuthorizationType: NONE
+      Target: !Sub integrations/${ResponsesIntegration}
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ResponsesApi
+      RouteKey: $default
+      Target: !Sub integrations/${ResponsesIntegration}
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${ResponsesApi}
+      RetentionInDays: !Ref LogRetentionDays
+      KmsKeyId: !Ref AWS::NoValue
+
+
+  ResponsesStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ResponsesApi
+      StageName: $default
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: '{\"requestId\":\"$context.requestId\",\"ip\":\"$context.identity.sourceIp\",\"requestTime\":\"$context.requestTime\",\"httpMethod\":\"$context.httpMethod\",\"path\":\"$context.path\",\"status\":\"$context.status\",\"protocol\":\"$context.protocol\",\"responseLatency\":\"$context.responseLatency\"}'
+
+  ProdStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ResponsesApi
+      StageName: prod
+      AutoDeploy: true
+
+  AllowApiInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ResponsesFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ResponsesApi}/*/*/*
+
+Outputs:
+  ApiEndpoint:
+    Description: HTTPS endpoint for the OpenAI-compatible Responses API proxy.
+    Value: !Sub https://${ResponsesApi}.execute-api.${AWS::Region}.amazonaws.com/prod/v1/responses
+
+  ApiId:
+    Description: API Gateway HTTP API identifier.
+    Value: !Ref ResponsesApi
+
+  LambdaFunctionName:
+    Description: Name of the deployed Lambda function.
+    Value: !Ref ResponsesFunction

@@ -1,0 +1,27 @@
+digraph "HABedrock Home Assistant Integration" {
+	graph [fontcolor="#2D3436" fontname="Sans-Serif" fontsize=15 label="HABedrock Home Assistant Integration" nodesep=0.60 pad=2.0 rankdir=LR ranksep=0.75 splines=ortho]
+	node [fixedsize=true fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13 height=1.4 imagescale=true labelloc=b shape=box style=rounded width=1.4]
+	edge [color="#7B8894"]
+	"4dac3cc5f9b74f1c9e8726de7aaf6633" [label="Home Assistant User / Voice" height=1.9 image="/Users/jarek/.cache/uv/archive-v0/bIDXo6zviFgTfowAWAsXE/lib/python3.14/site-packages/resources/aws/general/user.png" shape=none]
+	bd348a15f4664e95a27a63c365d66b45 [label="Home Assistant
+(Extended OpenAI Conversation)" height=2.3 image="/Users/jarek/.cache/uv/archive-v0/bIDXo6zviFgTfowAWAsXE/lib/python3.14/site-packages/resources/aws/general/user.png" shape=none]
+	subgraph "cluster_AWS Cloud" {
+		graph [bgcolor="#E5F5FD" fontname="Sans-Serif" fontsize=12 label="AWS Cloud" labeljust=l pencolor="#AEB6BE" rankdir=LR shape=box style=rounded]
+		cc56d4b96a6940c4862acb9dec7ebdbc [label="API Gateway
+HTTP API /v1" height=2.3 image="/Users/jarek/.cache/uv/archive-v0/bIDXo6zviFgTfowAWAsXE/lib/python3.14/site-packages/resources/aws/mobile/api-gateway.png" shape=none]
+		"1a520ab749df4bc684e550153dc53bc4" [label="ResponsesFunction
+(Lambda Python)" height=2.3 image="/Users/jarek/.cache/uv/archive-v0/bIDXo6zviFgTfowAWAsXE/lib/python3.14/site-packages/resources/aws/compute/lambda.png" shape=none]
+		cc8edd89d7964c6ab1d5ff367ab95df7 [label="SessionTable
+(DynamoDB)" height=2.3 image="/Users/jarek/.cache/uv/archive-v0/bIDXo6zviFgTfowAWAsXE/lib/python3.14/site-packages/resources/aws/database/dynamodb.png" shape=none]
+		c575d893485543f88f30e71502f30771 [label="Amazon Bedrock
+Nova model" height=2.3 image="/Users/jarek/.cache/uv/archive-v0/bIDXo6zviFgTfowAWAsXE/lib/python3.14/site-packages/resources/aws/ml/bedrock.png" shape=none]
+		e224823bd37245679a3d48f455b6a714 [label="CloudWatch Logs" height=1.9 image="/Users/jarek/.cache/uv/archive-v0/bIDXo6zviFgTfowAWAsXE/lib/python3.14/site-packages/resources/aws/management/cloudwatch.png" shape=none]
+	}
+	"4dac3cc5f9b74f1c9e8726de7aaf6633" -> bd348a15f4664e95a27a63c365d66b45 [label="Voice / Intent" dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+	bd348a15f4664e95a27a63c365d66b45 -> cc56d4b96a6940c4862acb9dec7ebdbc [label="HTTPS OpenAI API
+POST /v1/responses" dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+	cc56d4b96a6940c4862acb9dec7ebdbc -> "1a520ab749df4bc684e550153dc53bc4" [label=Invoke dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+	"1a520ab749df4bc684e550153dc53bc4" -> cc8edd89d7964c6ab1d5ff367ab95df7 [label="History load/save" dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+	"1a520ab749df4bc684e550153dc53bc4" -> c575d893485543f88f30e71502f30771 [label=Converse dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+	"1a520ab749df4bc684e550153dc53bc4" -> e224823bd37245679a3d48f455b6a714 [label=Logs dir=forward fontcolor="#2D3436" fontname="Sans-Serif" fontsize=13]
+}
