@@ -451,6 +451,47 @@ def convert_tool_message(message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def infer_tools_from_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    inferred: List[Dict[str, Any]] = []
+    seen_names: Set[str] = set()
+    for message in payload.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "assistant":
+            for call in message.get("tool_calls") or []:
+                function_def = call.get("function", {})
+                name = function_def.get("name")
+                if not isinstance(name, str) or not name or name in seen_names:
+                    continue
+                seen_names.add(name)
+                inferred.append(
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "description": f"Tool recovered from prior conversation history: {name}",
+                            "parameters": {"type": "object", "additionalProperties": True},
+                        },
+                    }
+                )
+        elif message.get("role") == "tool":
+            name = message.get("name")
+            if not isinstance(name, str) or not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            inferred.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": f"Tool recovered from prior conversation history: {name}",
+                        "parameters": {"type": "object", "additionalProperties": True},
+                    },
+                }
+            )
+    return inferred
+
+
 def convert_assistant_message(message: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     content_items = normalize_content(message.get("content"))
     parts: List[Dict[str, Any]] = []
@@ -560,9 +601,11 @@ def normalize_messages(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_tool_config(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if payload.get("_tools_disabled"):
-        return None
     tools = payload.get("tools")
+    inferred_from_history = False
+    if not tools:
+        tools = infer_tools_from_messages(payload)
+        inferred_from_history = bool(tools)
     if not tools:
         return None
     specs = []
@@ -584,6 +627,9 @@ def build_tool_config(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not specs:
         return None
     tool_config: Dict[str, Any] = {"tools": [{"toolSpec": spec} for spec in specs]}
+
+    if payload.get("_tools_disabled") and not inferred_from_history:
+        return tool_config
 
     tool_choice = payload.get("tool_choice")
     if tool_choice:
@@ -995,20 +1041,18 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         conversation_id = extract_conversation_id(headers, payload)
         clear_conversation = should_clear_conversation(payload)
         store = conversation_store()
-        history_plain: List[Dict[str, str]] = []
-        if conversation_id and store.enabled:
-            if clear_conversation:
-                store.delete(conversation_id)
-            else:
-                history_plain = store.load(conversation_id)
+        if conversation_id and store.enabled and clear_conversation:
+            store.delete(conversation_id)
 
-        messages_with_history = payload.get("messages") or []
-        system_messages = [msg for msg in messages_with_history if isinstance(msg, dict) and msg.get("role") == "system"]
-        non_system_messages = [msg for msg in messages_with_history if isinstance(msg, dict) and msg.get("role") != "system"]
-        history_messages_for_request: List[Dict[str, Any]] = []
-        if history_plain:
-            history_messages_for_request = [plain_entry_to_message(entry) for entry in history_plain]
-            payload["messages"] = system_messages + history_messages_for_request + non_system_messages
+        # Extended OpenAI Conversation already sends prior assistant/tool/user turns
+        # in the request body for an active conversation. Prepending Lambda-managed
+        # DynamoDB history duplicates those turns and can produce invalid Bedrock
+        # conversations after trimming. Keep the proxy stateless with respect to
+        # message history and forward the payload as received.
+        non_system_messages = [
+            msg for msg in (payload.get("messages") or [])
+            if isinstance(msg, dict) and msg.get("role") != "system"
+        ]
 
         payload_summary = {
             "model": payload.get("model"),
@@ -1017,7 +1061,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
             "stream": payload.get("stream", False),
             "path": api_path or normalized_path,
             "conversation_id": conversation_id,
-            "history_entries": len(history_plain),
+            "lambda_history_disabled": True,
             "clear_requested": bool(clear_conversation),
         }
         LOGGER.info("PAYLOAD_SUMMARY %s", payload_summary)
@@ -1040,24 +1084,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
         mode = "chat" if "chat/completions" in api_path else "responses"
         openai_response = map_response(effective_model_id, payload, bedrock_response, mode=mode)
 
-        if conversation_id and store.enabled:
-            updated_plain_history = list(history_plain)
-            for raw_message in non_system_messages:
-                append_plain_entry(updated_plain_history, message_to_plain_entry(raw_message))
-            output_text = openai_response.get("output_text")
-            assistant_entry_plain: Optional[Dict[str, str]] = None
-            if output_text:
-                assistant_entry_plain = {"role": "assistant", "content": output_text}
-            else:
-                tool_summaries = []
-                for call in openai_response.get("tool_calls") or []:
-                    name = call.get("function", {}).get("name")
-                    arguments = call.get("function", {}).get("arguments")
-                    tool_summaries.append(f"[tool_call {name} args={arguments}]")
-                if tool_summaries:
-                    assistant_entry_plain = {"role": "assistant", "content": " ".join(tool_summaries)}
-            append_plain_entry(updated_plain_history, assistant_entry_plain)
-            store.save(conversation_id, updated_plain_history)
+        if conversation_id:
             openai_response["conversation_id"] = conversation_id
 
         return success_response(openai_response)
